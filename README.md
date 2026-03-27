@@ -1,4 +1,7 @@
-<h1 align="center" style="line-height: 1.15; display: flex; align-items: center; justify-content: center;">
+
+# ContextAttack: Adversarial Image Attacks on Diffusion Transformer-Based Image Editing
+
+<!-- <h1 align="center" style="line-height: 1.15; display: flex; align-items: center; justify-content: center;">
   <img 
     src="assets/logo.png" 
     width="50"
@@ -155,4 +158,4 @@ python ./inference/step1x_inference.py
 ---
 
 ## 🙏 Acknowledgements
-Our work is built upon [Diffusers](https://github.com/huggingface/diffusers) and [Step1X-Edit](https://huggingface.co/stepfun-ai/Step1X-Edit). Thanks for their excellent work!
+Our work is built upon [Diffusers](https://github.com/huggingface/diffusers) and [Step1X-Edit](https://huggingface.co/stepfun-ai/Step1X-Edit). Thanks for their excellent work! -->
