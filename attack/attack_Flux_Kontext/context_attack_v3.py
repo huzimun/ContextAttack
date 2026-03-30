@@ -67,11 +67,22 @@ class AdversarialDataset(Dataset):
     - 每个样本是一张待攻击的输入图像
     """
 
-    def __init__(self, image_dir, resolution=512):
+    def __init__(self, image_dir, reference_images_dir=None, resolution=512):
         self.files = sorted([
             f for f in Path(image_dir).iterdir()
             if f.suffix.lower() in ['.jpg', '.png', '.jpeg']
         ])
+        
+        self.reference_images_dir = Path(reference_images_dir) if reference_images_dir is not None else None
+
+        if self.reference_images_dir is not None:
+            self.ref_files = sorted([
+                f for f in self.reference_images_dir.iterdir()
+                if f.suffix.lower() in ['.jpg', '.png', '.jpeg']
+            ])
+            assert len(self.files) == len(self.ref_files), "reference 图像数量必须与 condition 图像数量一致"
+        else:
+            self.ref_files = None
 
         self.transform = transforms.Compose([
             transforms.Resize(resolution),
@@ -87,10 +98,18 @@ class AdversarialDataset(Dataset):
         path = self.files[idx]
         img = Image.open(path).convert("RGB")
 
-        return {
+        sample = {
             "image": self.transform(img),
             "path": str(path)
         }
+
+        if self.ref_files is not None:
+            ref_path = self.ref_files[idx]
+            ref_img = Image.open(ref_path).convert("RGB")
+            sample["reference_image"] = self.transform(ref_img)
+            sample["reference_path"] = str(ref_path)
+
+        return sample
 
 
 # =========================
@@ -142,25 +161,49 @@ class AttentionHook:
         self.qkv = {}
         self.hooks = []
 
-    def register(self, transformer):
+    def register(self, transformer, selected_layers=None):
         """
         在所有 Transformer block 上注册 hook
         """
+        # 与原始 DeContext 一致：
+        # 若未显式指定，则默认只使用 early-to-middle 的 single blocks
+        if selected_layers is None:
+            selected_layers = {
+                "single_blocks": list(range(0, 26))
+            }
 
         def make_hook(name):
             def fn(module, inp, out):
                 self.qkv[name] = out.clone()
             return fn
 
-        for i, block in enumerate(transformer.single_transformer_blocks):
-            if hasattr(block.attn, "norm_q"):
-                self.hooks.append(
-                    block.attn.norm_q.register_forward_hook(make_hook(f"{i}_q"))
-                )
-            if hasattr(block.attn, "norm_k"):
-                self.hooks.append(
-                    block.attn.norm_k.register_forward_hook(make_hook(f"{i}_k"))
-                )
+        # ===== double blocks =====
+        for i in selected_layers.get("double_blocks", []):
+            if i < len(transformer.transformer_blocks):
+                block = transformer.transformer_blocks[i]
+                if hasattr(block, "attn"):
+                    if hasattr(block.attn, "norm_q"):
+                        self.hooks.append(
+                            block.attn.norm_q.register_forward_hook(make_hook(f"double_{i}_q"))
+                        )
+                    if hasattr(block.attn, "norm_k"):
+                        self.hooks.append(
+                            block.attn.norm_k.register_forward_hook(make_hook(f"double_{i}_k"))
+                        )
+
+        # ===== single blocks =====
+        for i in selected_layers.get("single_blocks", []):
+            if i < len(transformer.single_transformer_blocks):
+                block = transformer.single_transformer_blocks[i]
+                if hasattr(block, "attn"):
+                    if hasattr(block.attn, "norm_q"):
+                        self.hooks.append(
+                            block.attn.norm_q.register_forward_hook(make_hook(f"single_{i}_q"))
+                        )
+                    if hasattr(block.attn, "norm_k"):
+                        self.hooks.append(
+                            block.attn.norm_k.register_forward_hook(make_hook(f"single_{i}_k"))
+                        )
 
     def clear(self):
         for h in self.hooks:
@@ -196,23 +239,56 @@ def compute_context_proportion(qkv, rotary_emb):
         q = qkv[base+"_q"]
         k_ = qkv[base+"_k"]
 
-        # shape: [B, S, H, D]
         B, S, H, D = q.shape
+        
+        # 显式区分 single-stream 序列中的 [text | target | context]
+        # 这里沿用原始 DeContext 对 FLUX single block 的 token 布局假设：
+        # text:    [0, 512)
+        # target:  [512, 1536)
+        # context: [1536, 2560)
+        #
+        # 如果后续分辨率或 token 组织方式变化，这里的边界也需要同步调整。
+        # 根据 block 类型显式区分 token 布局
+        # 与原始 DeContext 一致：
+        #   double block: [target | context]
+        #   single block: [text | target | context]
+        if base.startswith("double_"):
+            if S != 2048:
+                continue
+            target_start, target_end = 0, 1024
+            context_start, context_end = 1024, 2048
+
+        elif base.startswith("single_"):
+            if S != 2560:
+                continue
+            text_start, text_end = 0, 512
+            target_start, target_end = 512, 1536
+            context_start, context_end = 1536, 2560
+
+        else:
+            continue
 
         # reshape
-        q = apply_rotary_emb(q, rotary_emb)
-        k_ = apply_rotary_emb(k_, rotary_emb)
+        q = apply_rotary_emb(q, rotary_emb, sequence_dim=1)
+        k_ = apply_rotary_emb(k_, rotary_emb, sequence_dim=1)
 
         q = q.permute(0,2,1,3)
         k_ = k_.permute(0,2,1,3)
 
-        attn = torch.softmax(q @ k_.transpose(-2,-1) / math.sqrt(D), dim=-1)
+        attn = torch.softmax(q @ k_.transpose(-2, -1) / math.sqrt(D), dim=-1)
 
-        # 假设后半是 context（与 packing 对齐）
-        context = attn[..., S//2:]
+        # 只保留 target token 作为 query
+        target_attn = attn[:, :, target_start:target_end, :]
 
-        prop = context.sum(dim=-1).mean()
+        # 只统计 target queries 分配给 context keys 的注意力质量
+        context_attn = target_attn[:, :, :, context_start:context_end]
+
+        prop = context_attn.sum(dim=-1).mean()
         props.append(prop)
+
+    if len(props) == 0:
+        # 保持和当前 device 一致；rotary_emb[0] 一定在正确设备上
+        return torch.tensor(0.0, device=rotary_emb[0].device)
 
     return torch.stack(props).mean()
 
@@ -220,34 +296,107 @@ def compute_context_proportion(qkv, rotary_emb):
 # =========================
 # 五种 Loss
 # =========================
-def compute_losses(vae, adv, ref, pred, ref_pred,
-                   hook, ref_hook, rotary_emb,
-                   shift, scale):
+def compute_losses(cond_latents_adv, cond_latents_ref,
+                   pred, ref_pred,
+                   hook, ref_hook, rotary_emb):
 
     # context
     ctx_prop = compute_context_proportion(hook.qkv, rotary_emb)
     Lc = 1 - ctx_prop
 
-    # latent
-    with torch.no_grad():
-        ref_lat = (vae.encode(ref).latent_dist.mode() - shift) * scale
-    adv_lat = (vae.encode(adv).latent_dist.mode() - shift) * scale
-    Ll = F.mse_loss(adv_lat, ref_lat)
+    # latent loss（直接使用当前 step 的 context latent）
+    Ll = F.mse_loss(cond_latents_adv, cond_latents_ref)
 
     # velocity
     Lv = F.mse_loss(pred, ref_pred)
 
-    # attention
-    La = 0
-    n = 0
-    for k in hook.qkv:
-        if k.endswith("_q") and k in ref_hook.qkv:
-            La += F.mse_loss(hook.qkv[k], ref_hook.qkv[k])
-            n += 1
-    La = La / max(n,1)
+    # attention map loss
+    # 真正对齐的是 softmax(QK^T / sqrt(d)) 之后的注意力分布，而不是 q/k 特征本身
+    # ===== attention map loss（DeContext-style：只对齐 target→context）=====
+    La = 0.0
+    n_attn = 0
 
-    # qk
-    Lq = La  # 可独立实现，这里简化共享
+    for name in hook.qkv:
+        if not name.endswith("_q"):
+            continue
+
+        base = name[:-2]
+        q_key = base + "_q"
+        k_key = base + "_k"
+
+        if q_key not in hook.qkv or k_key not in hook.qkv:
+            continue
+        if q_key not in ref_hook.qkv or k_key not in ref_hook.qkv:
+            continue
+
+        q = hook.qkv[q_key]
+        k_ = hook.qkv[k_key]
+        q_ref = ref_hook.qkv[q_key]
+        k_ref = ref_hook.qkv[k_key]
+
+        B, S, H, D = q.shape
+
+        # ===== 根据 block 类型确定切片区间 =====
+        if base.startswith("double_"):
+            if S != 2048:
+                continue
+            target_start, target_end = 0, 1024
+            context_start, context_end = 1024, 2048
+
+        elif base.startswith("single_"):
+            if S != 2560:
+                continue
+            target_start, target_end = 512, 1536
+            context_start, context_end = 1536, 2560
+
+        else:
+            continue
+
+        # ===== RoPE 对齐 =====
+        q = apply_rotary_emb(q, rotary_emb, sequence_dim=1)
+        k_ = apply_rotary_emb(k_, rotary_emb, sequence_dim=1)
+        q_ref = apply_rotary_emb(q_ref, rotary_emb, sequence_dim=1)
+        k_ref = apply_rotary_emb(k_ref, rotary_emb, sequence_dim=1)
+
+        # [B, H, S, D]
+        q = q.permute(0, 2, 1, 3)
+        k_ = k_.permute(0, 2, 1, 3)
+        q_ref = q_ref.permute(0, 2, 1, 3)
+        k_ref = k_ref.permute(0, 2, 1, 3)
+
+        # ===== attention 重建 =====
+        attn = torch.softmax(q @ k_.transpose(-2, -1) / math.sqrt(D), dim=-1)
+        attn_ref = torch.softmax(q_ref @ k_ref.transpose(-2, -1) / math.sqrt(D), dim=-1)
+
+        # ===== 只取 target → context 子注意力 =====
+        target_attn = attn[:, :, target_start:target_end, :]
+        target_attn_ref = attn_ref[:, :, target_start:target_end, :]
+
+        context_attn = target_attn[:, :, :, context_start:context_end]
+        context_attn_ref = target_attn_ref[:, :, :, context_start:context_end]
+
+        La = La + F.mse_loss(context_attn, context_attn_ref)
+        n_attn += 1
+
+    La = La / max(n_attn, 1)
+
+    # qk feature loss
+    # 对齐的是 attention 计算前的 q/k 特征，而不是 softmax 后的注意力分布
+    Lq = 0.0
+    n_qk = 0
+
+    for name in hook.qkv:
+        if name not in ref_hook.qkv:
+            continue
+
+        # 只对 q 和 k 两类特征做约束
+        if not (name.endswith("_q") or name.endswith("_k")):
+            continue
+
+        Lq = Lq + F.mse_loss(hook.qkv[name], ref_hook.qkv[name])
+        n_qk += 1
+
+    Lq = Lq / max(n_qk, 1)
 
     return Lc, Ll, Lv, La, Lq
 
@@ -358,18 +507,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pretrained_model_name_or_path", type=str)
     parser.add_argument("--condition_images_dir", type=str)
+    parser.add_argument("--reference_images_dir", type=str, default=None)
     parser.add_argument("--output_dir", type=str)
     parser.add_argument("--attack_steps", type=int, default=500)
     parser.add_argument("--alpha", type=float, default=0.005)
     parser.add_argument("--eps", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
-    
-    # loss weights
-    parser.add_argument("--w_context", type=float, default=1.0)
-    parser.add_argument("--w_latent", type=float, default=0.5)
-    parser.add_argument("--w_velocity", type=float, default=1.0)
-    parser.add_argument("--w_attention", type=float, default=1.0)
-    parser.add_argument("--w_qk", type=float, default=0.2)
+
+    # loss weights（统一接口，便于做 ablation）
+    parser.add_argument("--w_c", type=float, default=1.0, help="weight for context loss")
+    parser.add_argument("--w_l", type=float, default=0.5, help="weight for latent loss")
+    parser.add_argument("--w_v", type=float, default=1.0, help="weight for velocity loss")
+    parser.add_argument("--w_a", type=float, default=1.0, help="weight for attention-map loss")
+    parser.add_argument("--w_q", type=float, default=0.2, help="weight for qk-feature loss")
 
     parser.add_argument("--device", type=str, default=None,
                         help="device to run on (e.g. cpu, cuda, cuda:0). Auto-select if not set")
@@ -385,6 +535,9 @@ def main():
         level=logging.INFO,
     )
     logger.setLevel(logging.INFO)
+    
+    # ===== 确保输出目录存在 =====
+    os.makedirs(args.output_dir, exist_ok=True)
 
     # device selection: accept 'cpu', 'cuda', or 'cuda:0' style strings
     if args.device is None:
@@ -430,7 +583,11 @@ def main():
     # wandb init (single-process)
     if not args.no_wandb:
         try:
-            wandb.init(project="context_attack_v3", config=vars(args))
+            wandb.init(
+                project="context_attack_v3",
+                config=vars(args),
+                name=f"wc{args.w_c}_wl{args.w_l}_wv{args.w_v}_wa{args.w_a}_wq{args.w_q}"
+            )
         except Exception:
             logger.warning("wandb init failed; continuing without wandb")
 
@@ -446,6 +603,18 @@ def main():
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae").to(device)
     transformer = FluxTransformer2DModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="transformer").to(device)
 
+    # 显式切到推理模式，避免训练态行为影响结果
+    text_encoder_clip.eval()
+    text_encoder_t5.eval()
+    vae.eval()
+    transformer.eval()
+    
+    # 不更新模型参数，只保留对输入图像 adv 的梯度
+    text_encoder_clip.requires_grad_(False)
+    text_encoder_t5.requires_grad_(False)
+    vae.requires_grad_(False)
+    transformer.requires_grad_(False)
+    
     # ensure models and generated tensors share dtype when using mixed precision
     try:
         text_encoder_clip = text_encoder_clip.to(mp_dtype)
@@ -455,12 +624,16 @@ def main():
     except Exception:
         # fallback: if device/dtype combination isn't supported, keep models in default dtype
         logger.debug("Could not cast models to mp_dtype; keeping default dtype")
+        
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="scheduler"
     )
     
-    dataset = AdversarialDataset(args.condition_images_dir)
+    dataset = AdversarialDataset(
+        args.condition_images_dir,
+        reference_images_dir=args.reference_images_dir
+    )
     prompt_pool = get_prompt_pool()
     logger.info(f"Loaded {len(prompt_pool)} prompts in the pool")
     
@@ -493,6 +666,58 @@ def main():
         img = sample["image"].unsqueeze(0).to(device)
         original = img.clone()
         adv = img.clone().requires_grad_(True)
+        
+        if "reference_image" in sample:
+            reference_image = sample["reference_image"].unsqueeze(0).to(device)
+        else:
+            reference_image = original.clone()
+        
+        # 预先读取 VAE 的缩放参数
+        vae_shift = vae.config.shift_factor
+        vae_scale = vae.config.scaling_factor
+        
+        # 预先缓存 reference image 分支的 latent（整个攻击过程不变）
+        with torch.no_grad():
+            cond_latents_ref = vae.encode(reference_image).latent_dist.mode()
+            cond_latents_ref = (cond_latents_ref - vae_shift) * vae_scale
+                
+        # ===== cache packed_cond_ref 和 latent ids（只计算一次）=====
+
+        # context latent ids（固定）
+        cond_latent_ids = FluxKontextPipeline._prepare_latent_image_ids(
+            cond_latents_ref.shape[0],
+            cond_latents_ref.shape[2] // 2,
+            cond_latents_ref.shape[3] // 2,
+            device,
+            mp_dtype
+        )
+
+        # 标记为 context
+        cond_latent_ids[..., 0] = 1
+
+        # reference context latent pack（固定）
+        packed_cond_ref = FluxKontextPipeline._pack_latents(
+            cond_latents_ref,
+            cond_latents_ref.shape[0],
+            cond_latents_ref.shape[1],
+            cond_latents_ref.shape[2],
+            cond_latents_ref.shape[3]
+        )
+
+        # target latent ids（固定 shape，因为 noise shape 固定）
+        latent_image_ids = FluxKontextPipeline._prepare_latent_image_ids(
+            cond_latents_ref.shape[0],
+            cond_latents_ref.shape[2] // 2,
+            cond_latents_ref.shape[3] // 2,
+            device,
+            mp_dtype
+        )
+
+        # 拼接 ids（固定）
+        combined_latent_ids = torch.cat([latent_image_ids, cond_latent_ids], dim=0)
+
+        # 记录 batch size
+        bsz = img.shape[0]
 
         hook = AttentionHook()
 
@@ -507,6 +732,34 @@ def main():
             text_ids = text_ids_pool[prompt_idx]
 
             noise = torch.randn((1,16,64,64), device=device, dtype=mp_dtype)
+            # 将当前对抗图像编码为 context latent
+            cond_latents_adv = vae.encode(adv).latent_dist.mode()
+            cond_latents_adv = (cond_latents_adv - vae_shift) * vae_scale
+
+            # 将随机噪声视为 target noisy latent（与原始 DeContext 一致）
+            noisy_latents = noise
+
+            # pack target latent
+            packed_noisy_latents = FluxKontextPipeline._pack_latents(
+                noisy_latents,
+                bsz,
+                noisy_latents.shape[1],
+                noisy_latents.shape[2],
+                noisy_latents.shape[3]
+            )
+
+            # pack adv context latent
+            packed_cond_adv = FluxKontextPipeline._pack_latents(
+                cond_latents_adv,
+                bsz,
+                cond_latents_adv.shape[1],
+                cond_latents_adv.shape[2],
+                cond_latents_adv.shape[3]
+            )
+
+            # 拼接成 FLUX 所需输入：[target tokens | context tokens]
+            packed_input_adv = torch.cat([packed_noisy_latents, packed_cond_adv], dim=1)
+            packed_input_ref = torch.cat([packed_noisy_latents, packed_cond_ref], dim=1)
 
             # 采样高噪声区间的 timestep（与原始 DeContext 一致）
             bsz = 1
@@ -521,40 +774,55 @@ def main():
             timesteps_expanded = timesteps.expand(bsz).to(device=device, dtype=mp_dtype) / float(scheduler.config.num_train_timesteps)
 
             hook.clear()
-            hook.register(transformer)
+            hook.register(
+                transformer,
+                selected_layers={"single_blocks": list(range(0, 26))}
+            )
+
+
+            guidance = torch.tensor([3.5], device=device, dtype=mp_dtype)
 
             pred = transformer(
-                hidden_states=noise,
+                hidden_states=packed_input_adv,
                 timestep=timesteps_expanded,
+                guidance=guidance.expand(bsz),
                 encoder_hidden_states=embeds,
                 pooled_projections=pooled,
                 txt_ids=text_ids,
+                img_ids=combined_latent_ids,
                 return_dict=False
             )[0]
 
             with torch.no_grad():
                 ref_hook = AttentionHook()
-                ref_hook.register(transformer)
+                ref_hook.register(
+                    transformer,
+                    selected_layers={"single_blocks": list(range(0, 26))}
+                )
 
                 ref_pred = transformer(
-                    hidden_states=noise,
+                    hidden_states=packed_input_ref,
                     timestep=timesteps_expanded,
+                    guidance=guidance.expand(bsz),
                     encoder_hidden_states=embeds,
                     pooled_projections=pooled,
                     txt_ids=text_ids,
+                    img_ids=combined_latent_ids,
                     return_dict=False
                 )[0]
 
-            rotary_emb = transformer.pos_embed(torch.zeros(10,3, device=device, dtype=mp_dtype))
+            # 按 [text tokens | target image tokens | context image tokens] 的顺序构造 RoPE ids
+            ids = torch.cat([text_ids, latent_image_ids, cond_latent_ids], dim=0)
+            rotary_emb = transformer.pos_embed(ids)
 
             Lc, Ll, Lv, La, Lq = compute_losses(
-                vae, adv, original, pred, ref_pred,
-                hook, ref_hook, rotary_emb,
-                vae.config.shift_factor,
-                vae.config.scaling_factor
+                cond_latents_adv, cond_latents_ref,
+                pred, ref_pred,
+                hook, ref_hook, rotary_emb
             )
+            ref_hook.clear()
 
-            L = args.w_context*Lc - args.w_latent*Ll - args.w_velocity*Lv - args.w_attention*La - args.w_qk*Lq
+            L = args.w_c * Lc - args.w_l * Ll - args.w_v * Lv - args.w_a * La - args.w_q * Lq
 
             transformer.zero_grad()
             vae.zero_grad()
@@ -567,14 +835,25 @@ def main():
             if not args.no_wandb:
                 try:
                     wandb.log({
-                        "Lc": Lc.item(),
-                        "Ll": Ll.item(),
-                        "Lv": Lv.item(),
-                        "La": La.item(),
-                        "Lq": Lq.item(),
-                        "L": L.item(),
+                        # ===== losses =====
+                        "loss/context": Lc.item(),
+                        "loss/latent": Ll.item(),
+                        "loss/velocity": Lv.item(),
+                        "loss/attention": La.item(),
+                        "loss/qk": Lq.item(),
+                        "loss/total": L.item(),
+
+                        # ===== weights（方便做 ablation 对照）=====
+                        "weight/w_c": args.w_c,
+                        "weight/w_l": args.w_l,
+                        "weight/w_v": args.w_v,
+                        "weight/w_a": args.w_a,
+                        "weight/w_q": args.w_q,
+
+                        # ===== misc =====
                         "step": step,
                         "prompt": prompt,
+                        "prompt_idx": prompt_idx,
                     })
                 except Exception:
                     logger.debug("wandb.log failed for this step")

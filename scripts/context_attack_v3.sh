@@ -2,6 +2,7 @@
 
 PRETRAINED_MODEL="/home/humw/Pretrains/black-forest-labs/FLUX.1-Kontext-dev"
 CONDITION_IMAGES_DIR="./example"
+REFERENCE_IMAGES_DIR="./target_image"
 OUTPUT_DIR="./perturbed_v3"
 
 ALPHA=0.005
@@ -16,12 +17,12 @@ DEVICE="cuda:3"
 # set to 1 to disable wandb logging
 NO_WANDB=0
 
-# ===== 新增：loss weights =====
-W_CONTEXT=1.0
-W_LATENT=0.5
-W_VELOCITY=1.0
-W_ATTENTION=1.0
-W_QK=0.2
+# ===== loss weights =====
+W_C=0.0
+W_L=1.0
+W_V=1.0
+W_A=1.0
+W_Q=1.0
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -29,6 +30,7 @@ mkdir -p "$OUTPUT_DIR"
 CMD=(python -u ./attack/attack_Flux_Kontext/context_attack_v3.py
     --pretrained_model_name_or_path "$PRETRAINED_MODEL"
     --condition_images_dir "$CONDITION_IMAGES_DIR"
+    --reference_images_dir "$REFERENCE_IMAGES_DIR"
     --output_dir "$OUTPUT_DIR"
     --alpha "$ALPHA"
     --eps "$EPS"
@@ -36,11 +38,11 @@ CMD=(python -u ./attack/attack_Flux_Kontext/context_attack_v3.py
     --seed "$SEED"
     --mixed_precision "$MIXED_PRECISION"
     --device "$DEVICE"
-    --w_context "$W_CONTEXT"
-    --w_latent "$W_LATENT"
-    --w_velocity "$W_VELOCITY"
-    --w_attention "$W_ATTENTION"
-    --w_qk "$W_QK"
+    --w_c "$W_C"
+    --w_l "$W_L"
+    --w_v "$W_V"
+    --w_a "$W_A"
+    --w_q "$W_Q"
 )
 
 if [ "$NO_WANDB" -ne 0 ]; then

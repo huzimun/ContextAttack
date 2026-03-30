@@ -157,7 +157,7 @@ class AttentionHook:
                 'single_blocks': list(range(0, 26))
             }
         
-                # 针对某一层某一投影(q/k)构造 hook，缓存其输出
+        # 针对某一层某一投影(q/k)构造 hook，缓存其输出
         def create_norm_hook(layer_name, proj_type):
             def hook_fn(module, input, output):
                 if output is not None and hasattr(output, 'shape'):
@@ -165,7 +165,7 @@ class AttentionHook:
                     self.qkv_normalized[f"{layer_name}_{proj_type}"] = output.clone()
             return hook_fn
         
-                # double_blocks: 双流结构，通常对应文本/图像交互更显式的阶段
+        # double_blocks: 双流结构，通常对应文本/图像交互更显式的阶段
         for i in selected_layers.get('double_blocks', []):
             if i < len(transformer.transformer_blocks):
                 block = transformer.transformer_blocks[i]
@@ -177,7 +177,7 @@ class AttentionHook:
                             )
                             self.hooks.append(hook)
         
-                # single_blocks: 单流结构，文本与图像 token 已拼接到统一序列中
+        # single_blocks: 单流结构，文本与图像 token 已拼接到统一序列中
         for i in selected_layers.get('single_blocks', []):
             if i < len(transformer.single_transformer_blocks):
                 block = transformer.single_transformer_blocks[i]
