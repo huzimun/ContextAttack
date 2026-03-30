@@ -146,82 +146,6 @@ class AttentionHook:
         self.hooks = []
         self.qkv_normalized = {}
 
-
-# def compute_context_proportion(qkv_normalized_dict, image_rotary_emb):
-#     """
-#     Compute proportion of attention weight allocated to context image.
-    
-#     Returns:
-#         context_prop: Average proportion across all layers [scalar]
-#     """
-#     freqs_cos, freqs_sin = image_rotary_emb
-#     proportions = []
-    
-#     for layer_name in qkv_normalized_dict:
-#         if not layer_name.endswith('_q'):
-#             continue
-        
-#         layer_base = layer_name.replace('_q', '')
-#         q_key = f"{layer_base}_q"
-#         k_key = f"{layer_base}_k"
-        
-#         if q_key not in qkv_normalized_dict or k_key not in qkv_normalized_dict:
-#             continue
-        
-#         q_norm = qkv_normalized_dict[q_key]
-#         k_norm = qkv_normalized_dict[k_key]
-        
-#         batch_size, seq_len, heads, dim_head = q_norm.shape
-        
-#         # Determine sequence structure 
-#         # (default with 512*512, the sequence length needs to be adjusted with context images of different resolutions)
-#         if 'double_' in layer_base:
-#             if seq_len != 2048:
-#                 continue
-#             target_start, target_end = 0, 1024
-#             text_start, text_end = None, None
-#             context_start, context_end = 1024, 2048
-#         elif 'single_' in layer_base:
-#             if seq_len != 2560:
-#                 continue
-#             target_start, target_end = 512, 1536
-#             text_start, text_end = 0, 512
-#             context_start, context_end = 1536, 2560
-#         else:
-#             continue
-        
-#         # Apply RoPE
-#         q_with_rope = apply_rotary_emb(q_norm, image_rotary_emb, sequence_dim=1)
-#         k_with_rope = apply_rotary_emb(k_norm, image_rotary_emb, sequence_dim=1)
-        
-#         # Compute full attention scores
-#         q_with_rope = q_with_rope.permute(0, 2, 1, 3)  # [B, H, S, D]
-#         k_with_rope = k_with_rope.permute(0, 2, 1, 3)
-#         print(q_with_rope.shape)
-#         attn_scores = q_with_rope @ k_with_rope.transpose(-2, -1) / math.sqrt(dim_head)  # [B, H, S, S]
-#         print(attn_scores.shape)
-#         # Extract target queries
-#         target_attn_scores = attn_scores[:, :, target_start:target_end, :]  # [B, H, 1024, S]
-        
-#         # Softmax over all keys (text + target + context)
-#         attn_weights = F.softmax(target_attn_scores, dim=-1)  # [B, H, 1024, S]
-
-#         # Extract context weights
-#         context_weights = attn_weights[:, :, :, context_start:context_end]  # [B, H, 1024, 1024]
-          
-#         # Compute proportion: sum over context keys / total (which is 1 after softmax)
-#         context_prop_per_query = context_weights.sum(dim=-1)  # [B, H, 1024]
-        
-#         # Average over heads and queries
-#         layer_prop = context_prop_per_query.mean()  # scalar
-
-#         proportions.append(layer_prop)
-    
-#     if len(proportions) == 0:
-#         return torch.tensor(0.0)
-    
-#     return torch.stack(proportions).mean()
-
 def compute_context_proportion(qkv_normalized_dict, image_rotary_emb):
     """
     Compute proportion of attention weight allocated to context image.
@@ -296,23 +220,6 @@ def compute_context_proportion(qkv_normalized_dict, image_rotary_emb):
         return torch.tensor(0.0)
     
     return torch.stack(proportions).mean()
-
-
-
-# def sample_timestep_with_bias(current_step, total_steps, num_train_timesteps, device, batch_size=1):
-#     progress = current_step / total_steps  
-#     min_timestep = int((1 - progress) * 0 + progress * 980) 
-#     max_timestep = num_train_timesteps
-    
-#     timesteps = torch.randint(
-#         min_timestep, 
-#         max_timestep, 
-#         (batch_size,), 
-#         device=device
-#     ).long()
-    
-#     return timesteps
-
 
 
 def parse_args():
