@@ -12,7 +12,7 @@ MIXED_PRECISION="bf16"
 STEPS="$ATTACK_STEPS"
 
 # device to run on: set to "cuda" or "cpu"
-DEVICE="cuda:3"
+DEVICE="cuda:2"
 
 # set to 1 to disable wandb logging
 NO_WANDB=0
@@ -21,8 +21,8 @@ NO_WANDB=0
 W_C=0.0
 W_L=0.0
 W_V=0.0
-W_A=1.0
-W_Q=0.0
+W_A=0.0
+W_Q=1.0
 
 CONDITION_IMAGES_DIR="./example"
 REFERENCE_IMAGES_DIR="./target_image"

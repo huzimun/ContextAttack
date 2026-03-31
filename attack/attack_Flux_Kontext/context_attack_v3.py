@@ -298,10 +298,10 @@ def compute_context_proportion(qkv, rotary_emb):
 # =========================
 def compute_losses(cond_latents_adv, cond_latents_ref,
                    pred, ref_pred,
-                   hook, ref_hook, rotary_emb):
+                   adv_qkv, ref_qkv, rotary_emb):
 
     # context
-    ctx_prop = compute_context_proportion(hook.qkv, rotary_emb)
+    ctx_prop = compute_context_proportion(adv_qkv, rotary_emb)
     Lc = 1 - ctx_prop
 
     # latent loss（直接使用当前 step 的 context latent）
@@ -316,7 +316,7 @@ def compute_losses(cond_latents_adv, cond_latents_ref,
     La = 0.0
     n_attn = 0
 
-    for name in hook.qkv:
+    for name in adv_qkv:
         if not name.endswith("_q"):
             continue
 
@@ -324,15 +324,15 @@ def compute_losses(cond_latents_adv, cond_latents_ref,
         q_key = base + "_q"
         k_key = base + "_k"
 
-        if q_key not in hook.qkv or k_key not in hook.qkv:
+        if q_key not in adv_qkv or k_key not in adv_qkv:
             continue
-        if q_key not in ref_hook.qkv or k_key not in ref_hook.qkv:
+        if q_key not in ref_qkv or k_key not in ref_qkv:
             continue
 
-        q = hook.qkv[q_key]
-        k_ = hook.qkv[k_key]
-        q_ref = ref_hook.qkv[q_key]
-        k_ref = ref_hook.qkv[k_key]
+        q = adv_qkv[q_key]
+        k_ = adv_qkv[k_key]
+        q_ref = ref_qkv[q_key]
+        k_ref = ref_qkv[k_key]
 
         B, S, H, D = q.shape
 
@@ -385,15 +385,15 @@ def compute_losses(cond_latents_adv, cond_latents_ref,
     Lq = 0.0
     n_qk = 0
 
-    for name in hook.qkv:
-        if name not in ref_hook.qkv:
+    for name in adv_qkv:
+        if name not in ref_qkv:
             continue
 
         # 只对 q 和 k 两类特征做约束
         if not (name.endswith("_q") or name.endswith("_k")):
             continue
 
-        Lq = Lq + F.mse_loss(hook.qkv[name], ref_hook.qkv[name])
+        Lq = Lq + F.mse_loss(adv_qkv[name], ref_qkv[name])
         n_qk += 1
 
     Lq = Lq / max(n_qk, 1)
@@ -663,19 +663,18 @@ def main():
         torch.cuda.empty_cache()
 
     for sample in dataset:
-        img = sample["image"].unsqueeze(0).to(device)
-        original = img.clone()
-        adv = img.clone().requires_grad_(True)
+        img = sample["image"].unsqueeze(0).to(device).to(mp_dtype)
+        original = img.clone().to(mp_dtype)
+        adv = img.clone().requires_grad_(True).to(mp_dtype)
         
-        if "reference_image" in sample:
-            reference_image = sample["reference_image"].unsqueeze(0).to(device)
-        else:
-            reference_image = original.clone()
+        reference_image = sample["reference_image"].unsqueeze(0).to(device).to(mp_dtype)
+
         
         # 预先读取 VAE 的缩放参数
         vae_shift = vae.config.shift_factor
         vae_scale = vae.config.scaling_factor
         
+        # import pdb; pdb.set_trace()
         # 预先缓存 reference image 分支的 latent（整个攻击过程不变）
         with torch.no_grad():
             cond_latents_ref = vae.encode(reference_image).latent_dist.mode()
@@ -778,8 +777,8 @@ def main():
                 transformer,
                 selected_layers={"single_blocks": list(range(0, 26))}
             )
-
-
+            
+            # import pdb; pdb.set_trace()  # 调试点：检查输入输出维度、RoPE ids、attention maps 等关键变量的正确性
             guidance = torch.tensor([3.5], device=device, dtype=mp_dtype)
 
             pred = transformer(
@@ -792,6 +791,9 @@ def main():
                 img_ids=combined_latent_ids,
                 return_dict=False
             )[0]
+            
+            # 缓存 adv 分支的 qkv，避免后续 ref forward 覆盖
+            adv_qkv = {k: v.clone() for k, v in hook.qkv.items()}
 
             with torch.no_grad():
                 ref_hook = AttentionHook()
@@ -810,6 +812,9 @@ def main():
                     img_ids=combined_latent_ids,
                     return_dict=False
                 )[0]
+                
+                # 缓存 ref 分支的 qkv
+                ref_qkv = {k: v.clone() for k, v in ref_hook.qkv.items()}
 
             # 按 [text tokens | target image tokens | context image tokens] 的顺序构造 RoPE ids
             ids = torch.cat([text_ids, latent_image_ids, cond_latent_ids], dim=0)
@@ -818,10 +823,12 @@ def main():
             Lc, Ll, Lv, La, Lq = compute_losses(
                 cond_latents_adv, cond_latents_ref,
                 pred, ref_pred,
-                hook, ref_hook, rotary_emb
+                adv_qkv, ref_qkv, rotary_emb
             )
+            
             ref_hook.clear()
-
+            hook.clear()
+            
             L = args.w_c * Lc - args.w_l * Ll - args.w_v * Lv - args.w_a * La - args.w_q * Lq
 
             transformer.zero_grad()
@@ -859,8 +866,10 @@ def main():
                     logger.debug("wandb.log failed for this step")
 
         # 保存结果
-        out = ((adv[0].cpu().numpy().transpose(1,2,0)+1)*127.5).astype(np.uint8)
-        Image.fromarray(out).save(os.path.join(args.output_dir, Path(sample["path"]).name))
+        with torch.no_grad():
+            out = adv[0].detach().clamp(-1, 1).cpu().numpy().transpose(1, 2, 0)
+            out = ((out + 1) * 127.5).astype(np.uint8)
+            Image.fromarray(out).save(os.path.join(args.output_dir, Path(sample["path"]).name))
 
     # finish wandb run if enabled
     if not args.no_wandb:
