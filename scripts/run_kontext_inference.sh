@@ -1,14 +1,17 @@
 #!/bin/bash
 
 # Parameters (edit as needed)
-CONTEXT_IMAGE="perturbed/adversarial_170.png"
-# CONTEXT_IMAGE="example/170.jpg"
+BASE_CONTEXT_DIR="outputs/perturbed/"
+CONTEXT_NAME="loss_weights_1.0_0.0_0.0_0.0_0.0_eps_0.1_steps_800_v1"
+CONTEXT_IMAGE="${BASE_CONTEXT_DIR}/${CONTEXT_NAME}"
 PROMPT="A photo of this person"
 MODEL_PATH="/home/humw/Pretrains/black-forest-labs/FLUX.1-Kontext-dev"
-OUTPUT_DIR="./outputs"
+# Base output parent directory
+BASE_OUTPUT_DIR="outputs/edited"
+OUTPUT_DIR="${BASE_OUTPUT_DIR}/${CONTEXT_NAME}"
 GUIDANCE_SCALE=3.5
 NUM_INFERENCE_STEPS=20
-DEVICE="cuda:3"
+DEVICE="cuda:2"
 SEED=42
 WIDTH=512
 HEIGHT=512
