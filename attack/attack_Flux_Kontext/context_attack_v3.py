@@ -28,7 +28,7 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 from tqdm.auto import tqdm
-
+import time
 import random
 import logging
 import wandb
@@ -54,6 +54,12 @@ from transformers import (
 )
 
 logger = logging.getLogger(__name__)
+
+import signal, time, sys
+
+def _signal_handler(signum, frame):
+    print(f"[SIGNAL] received signal {signum} at {time.strftime('%H:%M:%S')}", flush=True)
+    sys.exit(1)
 
 # =========================
 # 数据集
@@ -505,6 +511,14 @@ def get_prompt_pool():
 # =========================
 def main():
     parser = argparse.ArgumentParser()
+    
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+    try:
+        signal.signal(signal.SIGHUP, _signal_handler)
+    except Exception:
+        pass
+
     parser.add_argument("--pretrained_model_name_or_path", type=str)
     parser.add_argument("--condition_images_dir", type=str)
     parser.add_argument("--reference_images_dir", type=str, default=None)
@@ -780,7 +794,8 @@ def main():
             
             # import pdb; pdb.set_trace()  # 调试点：检查输入输出维度、RoPE ids、attention maps 等关键变量的正确性
             guidance = torch.tensor([3.5], device=device, dtype=mp_dtype)
-
+            
+            t_pred = time.time()
             pred = transformer(
                 hidden_states=packed_input_adv,
                 timestep=timesteps_expanded,
@@ -791,6 +806,7 @@ def main():
                 img_ids=combined_latent_ids,
                 return_dict=False
             )[0]
+            pred_time = time.time() - t_pred
             
             # 缓存 adv 分支的 qkv，避免后续 ref forward 覆盖
             adv_qkv = {k: v.clone() for k, v in hook.qkv.items()}
@@ -801,7 +817,8 @@ def main():
                     transformer,
                     selected_layers={"single_blocks": list(range(0, 26))}
                 )
-
+                
+                t_ref = time.time()
                 ref_pred = transformer(
                     hidden_states=packed_input_ref,
                     timestep=timesteps_expanded,
@@ -812,6 +829,7 @@ def main():
                     img_ids=combined_latent_ids,
                     return_dict=False
                 )[0]
+                ref_time = time.time() - t_ref
                 
                 # 缓存 ref 分支的 qkv
                 ref_qkv = {k: v.clone() for k, v in ref_hook.qkv.items()}
@@ -820,6 +838,26 @@ def main():
             ids = torch.cat([text_ids, latent_image_ids, cond_latent_ids], dim=0)
             rotary_emb = transformer.pos_embed(ids)
 
+            if step % 10 == 0:
+                hook_count = len(hook.hooks)
+                ref_hook_count = len(ref_hook.hooks)
+
+                if device.type == "cuda":
+                    mem_alloc = torch.cuda.memory_allocated(device) / 1024**2
+                    mem_reserved = torch.cuda.memory_reserved(device) / 1024**2
+                    print(
+                        f"[DEBUG] step={step} pred_time={pred_time:.2f}s ref_time={ref_time:.2f}s "
+                        f"hook_count={hook_count} ref_hook_count={ref_hook_count} "
+                        f"mem_alloc={mem_alloc:.1f}MB mem_reserved={mem_reserved:.1f}MB",
+                        flush=True
+                    )
+                else:
+                    print(
+                        f"[DEBUG] step={step} pred_time={pred_time:.2f}s ref_time={ref_time:.2f}s "
+                        f"hook_count={hook_count} ref_hook_count={ref_hook_count}",
+                        flush=True
+                    )
+                    
             Lc, Ll, Lv, La, Lq = compute_losses(
                 cond_latents_adv, cond_latents_ref,
                 pred, ref_pred,
@@ -828,6 +866,9 @@ def main():
             
             ref_hook.clear()
             hook.clear()
+            
+            if step % 50 == 0:
+                print(f"[DEBUG] after clear: hook={len(hook.hooks)} ref_hook={len(ref_hook.hooks)}", flush=True)
             
             L = args.w_c * Lc - args.w_l * Ll - args.w_v * Lv - args.w_a * La - args.w_q * Lq
 
@@ -867,8 +908,8 @@ def main():
 
         # 保存结果
         with torch.no_grad():
-            out = adv[0].detach().clamp(-1, 1).cpu().numpy().transpose(1, 2, 0)
-            out = ((out + 1) * 127.5).astype(np.uint8)
+            out = adv[0].detach().clamp(-1, 1).float().cpu().numpy().transpose(1, 2, 0)
+            out = ((out + 1.0) * 127.5).astype(np.uint8)
             Image.fromarray(out).save(os.path.join(args.output_dir, Path(sample["path"]).name))
 
     # finish wandb run if enabled
