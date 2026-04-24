@@ -105,7 +105,7 @@ packed_input = [target_latents | context_latents]
 
 ## 4. 多层语义对齐机制
 
-Context Attack v4 引入 4 种对齐损失：
+Context Attack v4 引入 4 种对齐损失（豆包代码解析公示版：https://www.doubao.com/thread/w1a4aac9c27a04748）：
 
 ---
 
