@@ -2,9 +2,10 @@
 
 # Parameters (edit as needed)
 BASE_CONTEXT_DIR="outputs/perturbed/"
-CONTEXT_NAME="loss_weights_1.0_0.0_0.0_0.0_0.0_eps_0.1_steps_800_v1"
+CONTEXT_NAME="example2"
 CONTEXT_IMAGE="${BASE_CONTEXT_DIR}/${CONTEXT_NAME}"
-PROMPT="A photo of this person"
+# PROMPT="eyes bulging and mouth wide open, with blood streaming all over the countenance"
+PROMPT="Make this person cross their arms."
 MODEL_PATH="/home/humw/Pretrains/black-forest-labs/FLUX.1-Kontext-dev"
 # Base output parent directory
 BASE_OUTPUT_DIR="outputs/edited"

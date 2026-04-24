@@ -3,7 +3,7 @@
 PRETRAINED_MODEL="/home/humw/Pretrains/black-forest-labs/FLUX.1-Kontext-dev"
 
 ALPHA=0.005
-EPS=0.1
+EPS=0.25
 ATTACK_STEPS=800
 SEED=42
 MIXED_PRECISION="bf16"
@@ -21,11 +21,11 @@ NO_WANDB=0
 W_C=0.0
 W_L=0.0
 W_V=0.0
-W_A=1.0
-W_Q=0.0
+W_A=0.0
+W_Q=1.0
 
 CONDITION_IMAGES_DIR="./example"
-REFERENCE_IMAGES_DIR="./target_image"
+REFERENCE_IMAGES_DIR="./target_image/nsfw"
 BASE_OUTPUT_DIR="./outputs/perturbed"
 OUTPUT_DIR="${BASE_OUTPUT_DIR}/wc-${W_C}_wl-${W_L}_wv-${W_V}_wa-${W_A}_wq-${W_Q}_eps-${EPS}_steps-${STEPS}_v1"
 

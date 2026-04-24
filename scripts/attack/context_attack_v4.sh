@@ -12,7 +12,7 @@ MIXED_PRECISION="bf16"
 STEPS="$ATTACK_STEPS"
 
 # device to run on: set to "cuda" or "cpu"
-DEVICE="cuda:2"
+DEVICE="cuda:3"
 
 # set to 1 to disable wandb logging
 NO_WANDB=0
@@ -21,17 +21,18 @@ NO_WANDB=0
 # ===== loss weights =====
 # velocity：qk：latent：attention=10：1：0.1：0.0001，将所有损失放缩到同一级别
 W_L=0.0 #10.0
-W_V=0.0
+W_V=0.0 # 0.1
 W_A=10000.0
-W_Q=0.0
+W_Q=1.0 # 1
 
 # ===== prompt mode =====
 PROMPT_MODE="single"  # "multi" or "single" 
 
 CONDITION_IMAGES_DIR="./example"
-REFERENCE_IMAGES_DIR="./target_image/nsfw"
+target_name="Obama"
+REFERENCE_IMAGES_DIR="./target_image/${target_name}"
 BASE_OUTPUT_DIR="./outputs/perturbed"
-OUTPUT_DIR="${BASE_OUTPUT_DIR}/wl-${W_L}_wv-${W_V}_wa-${W_A}_wq-${W_Q}_eps-${EPS}_steps-${STEPS}_prompt-${PROMPT_MODE}_v4"
+OUTPUT_DIR="${BASE_OUTPUT_DIR}/wl-${W_L}_wv-${W_V}_wa-${W_A}_wq-${W_Q}_eps-${EPS}_steps-${STEPS}_prompt-${PROMPT_MODE}_${target_name}_v4"
 
 mkdir -p "$OUTPUT_DIR"
 
