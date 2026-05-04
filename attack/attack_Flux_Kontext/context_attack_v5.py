@@ -478,12 +478,17 @@ def main():
                         help="mixed precision mode (affects some tensors/ops)")
     parser.add_argument("--no_wandb", action="store_true", help="disable wandb logging")
 
+
     parser.add_argument("--prompt_mode", type=str, default="default", choices=["multi", "single"],
                         help="which prompt pool to use for attack optimization")
 
     # 新增参数
     parser.add_argument("--ref_prompt_suffix", type=str, default="eyes bulging and mouth wide open, with blood streaming all over the countenance", help="Suffix for reference branch prompt")
     parser.add_argument("--attn_layers", type=str, default="0-25", help="Attention block layers, e.g. '0-25' or '0,1,2,3'")
+
+    # wandb project/name
+    parser.add_argument("--project", type=str, default="context_attack_v5", help="wandb project name")
+    parser.add_argument("--run_name", type=str, default=None, help="wandb run name")
 
     args = parser.parse_args()
 
@@ -542,9 +547,9 @@ def main():
     if not args.no_wandb:
         try:
             wandb.init(
-                project="context_attack_v3",
+                project=args.project,
                 config=vars(args),
-                name=f"wl{args.w_l}_wv{args.w_v}_wa{args.w_a}_wq{args.w_q}"
+                name=args.run_name
             )
         except Exception:
             logger.warning("wandb init failed; continuing without wandb")

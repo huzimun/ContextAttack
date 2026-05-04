@@ -32,8 +32,11 @@ CONDITION_IMAGES_DIR="./example"
 # target_name="Obama"
 # REFERENCE_IMAGES_DIR="./target_image/${target_name}"
 REFERENCE_IMAGES_DIR=$CONDITION_IMAGES_DIR # 目标参考图像也是原始图像
+
 BASE_OUTPUT_DIR="./outputs/perturbed"
-OUTPUT_DIR="${BASE_OUTPUT_DIR}/wl-${W_L}_wv-${W_V}_wa-${W_A}_wq-${W_Q}_eps-${EPS}_steps-${STEPS}_prompt-${PROMPT_MODE}_v4"
+PROJECT="context_attack_v5"
+OUTPUT_NAME="wl-${W_L}_wv-${W_V}_wa-${W_A}_wq-${W_Q}_eps-${EPS}_steps-${STEPS}_prompt-${PROMPT_MODE}_v5"
+OUTPUT_DIR="${BASE_OUTPUT_DIR}/${OUTPUT_NAME}"
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -62,6 +65,8 @@ CMD=(python -u ./attack/attack_Flux_Kontext/context_attack_v5.py
     --prompt_mode "$PROMPT_MODE"
     --ref_prompt_suffix "$REF_PROMPT_SUFFIX"
     --attn_layers "$ATTN_LAYERS"
+    --project "$PROJECT"
+    --run_name "$OUTPUT_NAME"
 )
 
 if [ "$NO_WANDB" -ne 0 ]; then
@@ -77,13 +82,13 @@ fi
 # BASE_CONTEXT_DIR="outputs/perturbed/"
 # CONTEXT_NAME="example2"
 # CONTEXT_IMAGE="${BASE_CONTEXT_DIR}/${CONTEXT_NAME}"
-CONTEXT_IMAGE="${BASE_OUTPUT_DIR}/wl-${W_L}_wv-${W_V}_wa-${W_A}_wq-${W_Q}_eps-${EPS}_steps-${STEPS}_prompt-${PROMPT_MODE}_v4"
+CONTEXT_IMAGE="${BASE_OUTPUT_DIR}/${OUTPUT_NAME}"
 # PROMPT="eyes bulging and mouth wide open, with blood streaming all over the countenance"
 PROPT="A photo of this person"
-MODEL_PATH="/home/humw/Pretrains/black-forest-labs/FLUX.1-Kontext-dev"
+MODEL_PATH=${PRETRAINED_MODEL}
 # Base output parent directory
 # BASE_OUTPUT_DIR="outputs/edited"
-OUTPUT_DIR="outputs/edited/wl-${W_L}_wv-${W_V}_wa-${W_A}_wq-${W_Q}_eps-${EPS}_steps-${STEPS}_prompt-${PROMPT_MODE}_v4"
+OUTPUT_DIR="outputs/edited/${OUTPUT_NAME}"
 GUIDANCE_SCALE=3.5
 NUM_INFERENCE_STEPS=20
 SEED=42
